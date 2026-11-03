@@ -1,0 +1,101 @@
+# Runs on every push: the Shiny app checks, the descriptiveStats package check,
+# and the pharmaverse SDTM / ADaM / TLG scripts. Results: the Actions tab.
+
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  app:
+    name: Shiny app (testServer checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::shiny
+            any::bslib
+            any::dplyr
+            any::tidyr
+            any::tibble
+            any::ggplot2
+            any::plotly
+            any::DT
+            any::gtsummary
+            any::gt
+            any::survival
+            any::ggsurvfit
+            any::random.cdisc.data
+            any::base64enc
+      - name: Run the app checks
+        run: Rscript tests/check_app.R
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-checks
+          path: checks/
+
+  package:
+    name: descriptiveStats (R CMD check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: pharmaverse/descriptive_stats
+          extra-packages: any::rcmdcheck
+          needs: check
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          working-directory: pharmaverse/descriptive_stats
+
+  pharmaverse:
+    name: SDTM, ADaM and TLG scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::admiral
+            any::sdtm.oak
+            any::pharmaverseraw
+            any::pharmaversesdtm
+            any::pharmaverseadam
+            any::dplyr
+            any::stringr
+            any::gtsummary
+            any::gt
+            any::ggplot2
+            any::scales
+      # Each script stops with an error if one of its own checks fails
+      - name: Run the scripts
+        shell: bash
+        run: |
+          for script in \
+            pharmaverse/sdtm/create_ds_domain.R \
+            pharmaverse/adam/create_adsl.R \
+            pharmaverse/tlg/01_create_ae_summary_table.R \
+            pharmaverse/tlg/02_create_visualizations.R \
+            pharmaverse/tlg/03_create_listings.R
+          do
+            echo "::group::$script"
+            Rscript "$script"
+            echo "::endgroup::"
+          done

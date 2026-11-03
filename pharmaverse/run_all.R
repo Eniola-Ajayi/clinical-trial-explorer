@@ -1,0 +1,144 @@
+# =============================================================================
+# run_all.R - run every R deliverable from scratch and log the results
+#
+# Usage: set the working directory to the repository root, then
+#   source("pharmaverse/run_all.R")
+# A full log is written to pharmaverse/run_all_log.txt.
+# =============================================================================
+
+if (!dir.exists("pharmaverse")) {
+  stop("Please set the working directory to the repository root first, e.g.\n",
+       "  setwd(\"path/to/repo\")", call. = FALSE)
+}
+
+log_file <- file.path("pharmaverse", "run_all_log.txt")
+log_con <- file(log_file, open = "wt")
+sink(log_con, split = TRUE)
+sink(log_con, type = "message")
+
+step <- function(label, expr) {
+  cat("\n", strrep("=", 78), "\n", label, "\n", strrep("=", 78), "\n", sep = "")
+  start <- Sys.time()
+  ok <- tryCatch(
+    withCallingHandlers(
+      { force(expr); TRUE },
+      warning = function(w) {
+        cat("WARNING: ", conditionMessage(w), "\n", sep = "")
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) {
+      cat("ERROR: ", conditionMessage(e), "\n", sep = "")
+      FALSE
+    }
+  )
+  cat(sprintf("--> %s (%.1fs)\n", if (ok) "OK" else "FAILED",
+              as.numeric(difftime(Sys.time(), start, units = "secs"))))
+  invisible(ok)
+}
+
+# Run a script in its own environment so scripts cannot affect each other
+run_script <- function(path) {
+  source(path, local = new.env(parent = globalenv()), echo = FALSE)
+}
+
+# -----------------------------------------------------------------------------
+step("Install missing packages", {
+  pkgs <- c(
+    "devtools", "roxygen2", "testthat",
+    "dplyr", "stringr", "ggplot2", "scales", "gt", "gtsummary",
+    "admiral", "sdtm.oak", "pharmaverseraw", "pharmaversesdtm", "pharmaverseadam"
+  )
+  missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing)) {
+    cat("Installing:", paste(missing, collapse = ", "), "\n")
+    install.packages(missing, repos = "https://cloud.r-project.org")
+  }
+  for (p in pkgs) cat(sprintf("  %-16s %s\n", p, as.character(packageVersion(p))))
+})
+
+# -----------------------------------------------------------------------------
+pkg <- file.path("pharmaverse", "descriptive_stats")
+
+# Functions with the package's names in the global environment (e.g. from
+# sourcing a draft script) mask the package's own versions.
+clash <- intersect(
+  ls(globalenv()),
+  c("calc_mean", "calc_median", "calc_mode", "calc_q1", "calc_q3", "calc_iqr")
+)
+if (length(clash)) {
+  cat("NOTE: ", paste(clash, collapse = ", "), " found in the global environment. ",
+      "Clear them first with rm(", paste(clash, collapse = ", "), ").\n", sep = "")
+}
+
+step("descriptiveStats: document (roxygen2 -> man/ and NAMESPACE)", devtools::document(pkg))
+
+step("descriptiveStats: unit tests", {
+  res <- as.data.frame(devtools::test(pkg, reporter = "summary", stop_on_failure = FALSE))
+  cat("Tests:", sum(res$nb), " Failed:", sum(res$failed), " Errors:", sum(res$error),
+      " Skipped:", sum(res$skipped), "\n")
+  if (sum(res$failed) + sum(res$error) > 0) stop("some tests failed")
+})
+
+step("descriptiveStats: R CMD check", {
+  # On Windows, R CMD check needs the Rtools version that matches the R version
+  if (!pkgbuild::has_build_tools(debug = FALSE)) {
+    stop("Rtools for R ", getRversion(), " not found: install it from ",
+         "https://cran.r-project.org/bin/windows/Rtools/ and restart R")
+  }
+  chk <-devtools::check(pkg, error_on = "never", quiet = TRUE, document = FALSE)
+  cat("Errors:", length(chk$errors), " Warnings:", length(chk$warnings),
+      " Notes:", length(chk$notes), "\n")
+  for (x in c(chk$errors, chk$warnings, chk$notes)) cat("\n", x, "\n")
+})
+
+step("descriptiveStats: install and run the example", {
+  # Installed with base R's installer rather than devtools::install(): in this
+  # logged session, devtools::install() (which loads {pak}) left R unable to
+  # write files in the later steps ("Bad file descriptor"). descriptive_stats_demo.R keeps
+  # devtools::install(), the usual call when developing a package.
+  if ("descriptiveStats" %in% loadedNamespaces()) pkgload::unload("descriptiveStats")
+  install.packages(pkg, repos = NULL, type = "source", quiet = TRUE)
+
+  # The example runs in a fresh R process, as a user would after installing.
+  # Loading a package in the same session that just reinstalled it can fail
+  # ("lazy-load database ... is corrupt") if an older copy was loaded earlier.
+  demo <- tempfile(fileext = ".R")
+  writeLines(c(
+    "library(descriptiveStats)",
+    "data <- c(1, 2, 2, 3, 4, 5, 5, 5, 6, 10)",
+    "print(c(mean = calc_mean(data), median = calc_median(data),",
+    "        mode = calc_mode(data), q1 = calc_q1(data), q3 = calc_q3(data),",
+    "        iqr = calc_iqr(data)))",
+    "# A data frame by group (like PROC MEANS with CLASS)",
+    "print(describe_stats(pharmaverseadam::adsl, vars = 'AGE', by = 'TRT01A'))"
+  ), demo)
+  output <- system2(file.path(R.home("bin"), "Rscript"), shQuote(demo),
+                    stdout = TRUE, stderr = TRUE)
+  cat(output, sep = "\n")
+  status <- attr(output, "status")
+  if (!is.null(status) && status != 0) stop("the example script failed (see above)")
+})
+
+# -----------------------------------------------------------------------------
+step("SDTM: DS domain", run_script(file.path("pharmaverse", "sdtm", "create_ds_domain.R")))
+step("ADaM: ADSL", run_script(file.path("pharmaverse", "adam", "create_adsl.R")))
+step("TLG: AE summary table", run_script(file.path("pharmaverse", "tlg", "01_create_ae_summary_table.R")))
+step("TLG: AE visualisations", run_script(file.path("pharmaverse", "tlg", "02_create_visualizations.R")))
+step("TLG: AE listing", run_script(file.path("pharmaverse", "tlg", "03_create_listings.R")))
+
+# -----------------------------------------------------------------------------
+step("Output files", {
+  outs <- list.files(
+    c("pharmaverse/sdtm/output", "pharmaverse/adam/output", "pharmaverse/tlg/output"),
+    full.names = TRUE
+  )
+  print(data.frame(file = outs, kb = round(file.size(outs) / 1024, 1)))
+})
+
+step("Session info", print(sessionInfo()))
+
+sink(type = "message")
+sink()
+close(log_con)
+cat("Done. See", log_file, "\n")
